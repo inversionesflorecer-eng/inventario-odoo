@@ -89,7 +89,7 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
 
         const contextoAuth = { login: USERNAME, password: PASSWORD };
 
-        // 1. Buscar Producto DIRECTAMENTE
+        // 1. Buscar el producto (Retorna un Array de IDs, ej:)
         const ids = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'search', 
@@ -102,47 +102,72 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             return alert("Producto no encontrado en Odoo.");
         }
 
-        const primerId = ids[0]; // Extrae el ID numérico del primer producto encontrado
+        // 🟢 CORRECCIÓN CRUCIAL DE MATRICES: Aseguramos que sea un ID numérico puro
+        const productoId = Array.isArray(ids) ? ids[0] : ids;
 
-        // 2. Leer los datos base del producto
+        // 2. Leer datos base pasando el ID dentro de una sola capa de array: [productoId]
         const productos = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'read',
-            args: [[primerId], ['image_512', 'list_price', 'salt_ids']], 
+            args: [[productoId], ['image_512', 'list_price', 'salt_ids', 'product_tmpl_id']], 
             kwargs: { context: contextoAuth }
         });
         
-        const prod = productos[0]; // Obtiene el objeto del producto
+        // Odoo siempre devuelve un array de objetos al hacer read(), extraemos el primero
+        const prod = Array.isArray(productos) ? productos[0] : productos; 
 
-        // Variables para los datos cruzados
+        if (!prod) {
+            loader.style.display = 'none';
+            return alert("Error al leer las propiedades del producto.");
+        }
+
         let nombresPrincipiosActivos = 'No asignado';
         let loteNombre = 'Sin lote registrado';
 
-        // 3. Consultas en paralelo (Sales y Lotes al mismo tiempo para máxima velocidad)
         const promesas = [];
 
-        // Promesa A: Buscar principios activos si el campo many2many contiene IDs
-        if (prod.salt_ids && prod.salt_ids.length > 0) {
+        // Evaluar e identificar las sales (salt_ids)
+        let idsDeSales = prod.salt_ids;
+        
+        // Si no está en la variante, leemos la plantilla
+        if ((!idsDeSales || idsDeSales.length === 0) && prod.product_tmpl_id) {
+            try {
+                const plantillaId = Array.isArray(prod.product_tmpl_id) ? prod.product_tmpl_id[0] : prod.product_tmpl_id;
+                const plantillas = await peticionOdoo('/web/dataset/call_kw/', {
+                    model: 'product.template',
+                    method: 'read',
+                    args: [[plantillaId], ['salt_ids']],
+                    kwargs: { context: contextoAuth }
+                });
+                const tmpl = Array.isArray(plantillas) ? plantillas[0] : plantillas;
+                if (tmpl && tmpl.salt_ids) idsDeSales = tmpl.salt_ids;
+            } catch (errTmpl) { 
+                console.error("Error en plantilla:", errTmpl); 
+            }
+        }
+
+        // Promesa A: Consultar nombres de principios activos
+        if (idsDeSales && idsDeSales.length > 0) {
             promesas.push(
                 peticionOdoo('/web/dataset/call_kw/', {
                     model: 'basic.salt',
                     method: 'read',
-                    args: [prod.salt_ids, ['name']],
+                    args: [idsDeSales, ['name']], // Pasamos la lista de IDs directamente
                     kwargs: { context: contextoAuth }
                 }).then(salesData => {
                     if (salesData && salesData.length > 0) {
                         nombresPrincipiosActivos = salesData.map(s => s.name).join(', ');
                     }
-                }).catch(e => console.error("Error leyendo sales:", e))
+                }).catch(e => console.error("Error en sales:", e))
             );
         }
 
-        // Promesa B: Buscar el lote más reciente en el inventario
+        // Promesa B: Consultar lote más reciente
         promesas.push(
             peticionOdoo('/web/dataset/call_kw/', {
                 model: 'stock.lot', 
                 method: 'search_read',
-                args: [[['product_id', '=', prod.id]]],
+                args: [[['product_id', '=', productoId]]],
                 kwargs: { 
                     fields: ['name'], 
                     limit: 1, 
@@ -151,15 +176,14 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
                 }
             }).then(lotes => {
                 if (lotes && lotes.length > 0) {
-                    loteNombre = lotes[0].name;
+                    loteNombre = lotes[0].name; // Extrae el texto del primer objeto del lote
                 }
-            }).catch(e => console.error("Error leyendo lotes:", e))
+            }).catch(e => console.error("Error en lotes:", e))
         );
 
-        // Esperar a que ambas consultas terminen
         await Promise.all(promesas);
 
-        // 4. Renderizar la información final en la PWA
+        // 4. Renderizar la información en pantalla
         document.getElementById('res-imagen').src = prod.image_512 ? `data:image/png;base64,${prod.image_512}` : 'https://placehold.co';
         document.getElementById('res-precio').innerText = `$${prod.list_price.toFixed(2)}`;
         document.getElementById('res-lote').innerText = loteNombre;
@@ -170,8 +194,9 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
 
     } catch (error) {
         loader.style.display = 'none';
-        alert("Ocurrió un inconveniente al procesar los datos de Odoo.");
-        console.error("Detalle del error:", error);
+        // 🟢 MEJORA DE DIAGNÓSTICO: Te dirá en la pantalla del celular qué falló exactamente
+        alert("Inconveniente: " + error.message);
+        console.error("Detalle:", error);
     }
 }
 
