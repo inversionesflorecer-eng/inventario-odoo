@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buscador Inventario Odoo</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f6f9; color: #333; }
+        .container { max-width: 500px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: #714B67; margin-top: 0; } /* Color corporativo Odoo */
+        .search-box { display: flex; gap: 10px; margin-bottom: 20px; }
+        input[type="text"] { flex: 1; padding: 12px; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; }
+        button { background-color: #714B67; color: white; border: none; padding: 12px; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold; }
+        .btn-scan { background-color: #218838; }
+        #video-container { display: none; position: relative; margin-bottom: 20px; text-align: center; }
+        video { width: 100%; max-height: 250px; border-radius: 8px; background: #000; }
+        .result-card { display: none; border-top: 3px solid #714B67; padding-top: 20px; margin-top: 20px; }
+        .product-img { width: 100%; max-height: 200px; object-fit: contain; border-radius: 8px; background: #f9f9f9; margin-bottom: 15px; }
+        .data-item { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 16px; }
+        .data-label { font-weight: bold; color: #666; }
+        .data-value { color: #111; font-weight: bold; }
+        .loading { display: none; text-align: center; font-style: italic; color: #666; margin: 10px 0; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Consulta de Artículo</h2>
+    
+    <!-- Zona de Búsqueda Mixta -->
+    <div class="search-box">
+        <input type="text" id="txt-buscar" placeholder="Escribe nombre o código...">
+        <button onclick="buscarPorTexto()">Buscar</button>
+        <button class="btn-scan" onclick="encenderCamara()">📷 Escanear</button>
+    </div>
+
+    <!-- Contenedor del Escáner de Cámara -->
+    <div id="video-container">
+        <video id="webcam" autoplay playsinline></video>
+        <button style="margin-top: 10px; background-color: #dc3545;" onclick="apagarCamara()">Cerrar Cámara</button>
+    </div>
+
+    <div id="loader" class="loading">Buscando en Odoo...</div>
+
+    <!-- Tarjeta de Resultados (Las 4 cosas solicitadas) -->
+    <div id="resultado" class="result-card">
+        <img id="res-imagen" class="product-img" src="" alt="Imagen del producto">
+        
+        <div class="data-item">
+            <span class="data-label">Precio:</span>
+            <span id="res-precio" class="data-value">--</span>
+        </div>
+        <div class="data-item">
+            <span class="data-label">Lote Activo:</span>
+            <span id="res-lote" class="data-value">--</span>
+        </div>
+        <div class="data-item">
+            <span class="data-label">Principio Activo:</span>
+            <span id="res-principio" class="data-value">--</span>
+        </div>
+    </div>
+</div>
+
+<script>
+// Configuración de Credenciales Odoo (Reemplazar con tus datos)
+const ODOO_URL = 'https://farmaciaselecta.com';
+const DB_NAME = 'selecta';
+const USERNAME = 'info@farmaciaselecta.com';
+const PASSWORD = 'Sky$land003';
+
+let videoStream = null;
+let intervaloEscaneo = null;
+
+// --- CONTROL DE LA CÁMARA Y ESCANEO ---
+async function encenderCamara() {
+    if (!('BarcodeDetector' in window)) {
+        alert('El escaneo nativo no es soportado en este navegador. Por favor ingresa el código manualmente.');
+        return;
+    }
+    
+    const videoContainer = document.getElementById('video-container');
+    const video = document.getElementById('webcam');
+    videoContainer.style.display = 'block';
+
+    try {
+        videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.srcObject = videoStream;
+        
+        // Iniciar detector de códigos de barra
+        const detector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8', 'qr_code'] });
+        
+        intervaloEscaneo = setInterval(async () => {
+            try {
+                const barcodes = await detector.detect(video);
+                if (barcodes.length > 0) {
+                    const codigoDetectado = barcodes[0].rawValue;
+                    document.getElementById('txt-buscar').value = codigoDetectado;
+                    apagarCamara();
+                    ejecutarConsultaOdoo(codigoDetectado, true); // Busca por código de barras
+                }
+            } catch (e) { /* Evitar saturar la consola durante el renderizado */ }
+        }, 300);
+
+    } catch (err) {
+        alert("Error al acceder a la cámara: " + err);
+        videoContainer.style.display = 'none';
+    }
+}
+
+function apagarCamara() {
+    if (videoStream) {
+        videoStream.getTracks().forEach(track => track.stop());
+    }
+    clearInterval(intervaloEscaneo);
+    document.getElementById('video-container').style.display = 'none';
+}
+
+// --- CONEXIÓN Y CONSULTA A ODOO ---
+function buscarPorTexto() {
+    const texto = document.getElementById('txt-buscar').value.trim();
+    if (texto === "") return alert("Por favor escribe algo para buscar.");
+    ejecutarConsultaOdoo(texto, false);
+}
+
+async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
+    const loader = document.getElementById('loader');
+    const tarjeta = document.getElementById('resultado');
+    loader.style.display = 'block';
+    tarjeta.style.display = 'none';
+
+    try {
+        // 1. Autenticación JSON-RPC
+        const auth = await peticionOdoo('/web/session/authenticate', { db: DB_NAME, login: USERNAME, password: PASSWORD });
+        
+        // 2. Definir filtro: por código de barras o por nombre/referencia
+        const filtro = esCodigoBarras 
+            ? [['barcode', '=', criterio]] 
+            : ['|', ['name', 'ilike', criterio], ['default_code', 'ilike', criterio]];
+
+        // 3. Buscar Producto
+        const ids = await peticionOdoo('/web/dataset/call_kw', {
+            model: 'product.product', method: 'search', args: [filtro], kwargs: {}
+        });
+
+        if (!ids || ids.length === 0) {
+            loader.style.display = 'none';
+            return alert("Producto no encontrado en Odoo.");
+        }
+
+        // 4. Leer los campos del primer producto encontrado
+        const productos = await peticionOdoo('/web/dataset/call_kw', {
+            model: 'product.product', method: 'read',
+            args: [[ids[0]], ['image_512', 'list_price', 'x_principio_activo']], kwargs: {}
+        });
+        const prod = productos[0];
+
+        // 5. Consultar Lote en stock.lot (o stock.production.lot en v16)
+        const lotes = await peticionOdoo('/web/dataset/call_kw', {
+            model: 'stock.lot', method: 'search_read',
+            args: [[['product_id', '=', prod.id]]],
+            kwargs: { fields: ['name'], limit: 1, order: 'create_date desc' }
+        });
+        const loteNombre = lotes.length > 0 ? lotes[0].name : 'Sin lote registrado';
+
+        // 6. Pintar las 4 cosas en la pantalla
+        document.getElementById('res-imagen').src = prod.image_512 ? `data:image/png;base64,${prod.image_512}` : 'https://placehold.co';
+        document.getElementById('res-precio').innerText = `$${prod.list_price.toFixed(2)}`;
+        document.getElementById('res-lote').innerText = loteNombre;
+        document.getElementById('res-principio').innerText = prod.x_principio_activo || 'No asignado';
+
+        loader.style.display = 'none';
+        tarjeta.style.display = 'block';
+
+    } catch (error) {
+        loader.style.display = 'none';
+        alert("Error de comunicación con Odoo.");
+        console.error(error);
+    }
+}
+
+// Función core para peticiones fetch HTTP
+async function peticionOdoo(ruta, params) {
+    const response = await fetch(`${ODOO_URL}${ruta}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'call', params: params, id: Math.random() })
+    });
+    const json = await response.json();
+    return json.result;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "name": "Buscador Inventario Odoo",
+  "short_name": "Odoo Inv",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#714B67",
+  "theme_color": "#714B67",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "https://placehold.co",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://placehold.co",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
