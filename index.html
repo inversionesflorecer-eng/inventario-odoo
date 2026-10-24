@@ -89,7 +89,7 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
 
         const contextoAuth = { login: USERNAME, password: PASSWORD };
 
-        // 1. Buscar el producto (Retorna un Array de IDs, ej:)
+        // 1. Buscar el producto (Pasamos el modelo y el filtro)
         const ids = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'search', 
@@ -102,10 +102,9 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             return alert("Producto no encontrado en Odoo.");
         }
 
-        // 🟢 CORRECCIÓN CRUCIAL DE MATRICES: Aseguramos que sea un ID numérico puro
         const productoId = Array.isArray(ids) ? ids[0] : ids;
 
-        // 2. Leer datos base pasando el ID dentro de una sola capa de array: [productoId]
+        // 2. Leer datos base pasando el ID purificado
         const productos = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'read',
@@ -113,7 +112,6 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             kwargs: { context: contextoAuth }
         });
         
-        // Odoo siempre devuelve un array de objetos al hacer read(), extraemos el primero
         const prod = Array.isArray(productos) ? productos[0] : productos; 
 
         if (!prod) {
@@ -125,11 +123,9 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
         let loteNombre = 'Sin lote registrado';
 
         const promesas = [];
-
-        // Evaluar e identificar las sales (salt_ids)
         let idsDeSales = prod.salt_ids;
         
-        // Si no está en la variante, leemos la plantilla
+        // Búsqueda en plantilla si es necesario
         if ((!idsDeSales || idsDeSales.length === 0) && prod.product_tmpl_id) {
             try {
                 const plantillaId = Array.isArray(prod.product_tmpl_id) ? prod.product_tmpl_id[0] : prod.product_tmpl_id;
@@ -141,18 +137,16 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
                 });
                 const tmpl = Array.isArray(plantillas) ? plantillas[0] : plantillas;
                 if (tmpl && tmpl.salt_ids) idsDeSales = tmpl.salt_ids;
-            } catch (errTmpl) { 
-                console.error("Error en plantilla:", errTmpl); 
-            }
+            } catch (errTmpl) { console.error("Error en plantilla:", errTmpl); }
         }
 
-        // Promesa A: Consultar nombres de principios activos
+        // Consulta paralela de Sales
         if (idsDeSales && idsDeSales.length > 0) {
             promesas.push(
                 peticionOdoo('/web/dataset/call_kw/', {
                     model: 'basic.salt',
                     method: 'read',
-                    args: [idsDeSales, ['name']], // Pasamos la lista de IDs directamente
+                    args: [idsDeSales, ['name']], 
                     kwargs: { context: contextoAuth }
                 }).then(salesData => {
                     if (salesData && salesData.length > 0) {
@@ -162,7 +156,7 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             );
         }
 
-        // Promesa B: Consultar lote más reciente
+        // Consulta paralela de Lotes
         promesas.push(
             peticionOdoo('/web/dataset/call_kw/', {
                 model: 'stock.lot', 
@@ -176,16 +170,16 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
                 }
             }).then(lotes => {
                 if (lotes && lotes.length > 0) {
-                    loteNombre = lotes[0].name; // Extrae el texto del primer objeto del lote
+                    loteNombre = lotes[0].name; 
                 }
             }).catch(e => console.error("Error en lotes:", e))
         );
 
         await Promise.all(promesas);
 
-        // 4. Renderizar la información en pantalla
+        // 4. Pintar datos finales en la interfaz
         document.getElementById('res-imagen').src = prod.image_512 ? `data:image/png;base64,${prod.image_512}` : 'https://placehold.co';
-        document.getElementById('res-precio').innerText = `$${prod.list_price.toFixed(2)}`;
+        document.getElementById('res-precio').innerText = `L. ${prod.list_price.toFixed(2)}`;
         document.getElementById('res-lote').innerText = loteNombre;
         document.getElementById('res-principio').innerText = nombresPrincipiosActivos;
 
@@ -194,23 +188,33 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
 
     } catch (error) {
         loader.style.display = 'none';
-        // 🟢 MEJORA DE DIAGNÓSTICO: Te dirá en la pantalla del celular qué falló exactamente
         alert("Inconveniente: " + error.message);
-        console.error("Detalle:", error);
     }
 }
 
-// Función core limpia para peticiones HTTP POST JSON-RPC con barra final
-async function peticionOdoo(ruta, params) {
+// 🟢 FUNCIÓN CORE CORREGIDA: Ahora incluye de forma obligatoria el nombre de la BD (db) en los parámetros JSON-RPC
+async function peticionOdoo(ruta, datosEnvio) {
+    // Forzamos a Odoo a recibir la base de datos técnica en cada consulta
+    const cuerpoPeticion = {
+        jsonrpc: '2.0',
+        method: 'call',
+        params: {
+            ...datosEnvio,
+            db: DB_NAME // Inyecta 'selecta' directamente en la raíz de los parámetros
+        },
+        id: Math.floor(Math.random() * 1000)
+    };
+
     const response = await fetch(`${ODOO_URL}${ruta}`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', method: 'call', params: params, id: Math.floor(Math.random() * 1000) })
+        body: JSON.stringify(cuerpoPeticion)
     });
+    
     const json = await response.json();
     
     if (json.error) {
-        throw new Error(json.error.data.message || "Error interno de Odoo");
+        throw new Error(json.error.data.message || "Error interno de validación en Odoo");
     }
     
     return json.result;
