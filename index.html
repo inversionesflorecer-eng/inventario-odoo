@@ -89,7 +89,7 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
 
         const contextoAuth = { login: USERNAME, password: PASSWORD };
 
-        // 1. Buscar Producto DIRECTAMENTE sin llamada de login previa
+        // 1. Buscar Producto DIRECTAMENTE
         const ids = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'search', 
@@ -102,58 +102,76 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             return alert("Producto no encontrado en Odoo.");
         }
 
-        const primerId = ids[0]; // Tomamos el primer elemento encontrado de la lista
+        const primerId = ids[0]; // Extrae el ID numérico del primer producto encontrado
 
-        // 2. Leer los campos del producto (Reemplazado x_principio_activo por salt_ids)
+        // 2. Leer los datos base del producto
         const productos = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'read',
             args: [[primerId], ['image_512', 'list_price', 'salt_ids']], 
             kwargs: { context: contextoAuth }
         });
-        const prod = productos[0];
+        
+        const prod = productos[0]; // Obtiene el objeto del producto
 
-        // 3. Procesar el campo Many2many (salt_ids) para obtener los nombres reales
-        let nombresPrincipios Activos = 'No asignado';
+        // Variables para los datos cruzados
+        let nombresPrincipiosActivos = 'No asignado';
+        let loteNombre = 'Sin lote registrado';
+
+        // 3. Consultas en paralelo (Sales y Lotes al mismo tiempo para máxima velocidad)
+        const promesas = [];
+
+        // Promesa A: Buscar principios activos si el campo many2many contiene IDs
         if (prod.salt_ids && prod.salt_ids.length > 0) {
-            // Consultamos el modelo relacionado 'basic.salt' para traer el campo 'name'
-            const salesData = await peticionOdoo('/web/dataset/call_kw/', {
-                model: 'basic.salt',
-                method: 'read',
-                args: [prod.salt_ids, ['name']],
-                kwargs: { context: contextoAuth }
-            });
-            // Unimos todos los nombres en una sola cadena separada por comas (por si tiene más de una sal)
-            nombresPrincipios Activos = salesData.map(s => s.name).join(', ');
+            promesas.push(
+                peticionOdoo('/web/dataset/call_kw/', {
+                    model: 'basic.salt',
+                    method: 'read',
+                    args: [prod.salt_ids, ['name']],
+                    kwargs: { context: contextoAuth }
+                }).then(salesData => {
+                    if (salesData && salesData.length > 0) {
+                        nombresPrincipiosActivos = salesData.map(s => s.name).join(', ');
+                    }
+                }).catch(e => console.error("Error leyendo sales:", e))
+            );
         }
 
-        // 4. Consultar el Lote más reciente en stock.lot
-        const lotes = await peticionOdoo('/web/dataset/call_kw/', {
-            model: 'stock.lot', 
-            method: 'search_read',
-            args: [[['product_id', '=', prod.id]]],
-            kwargs: { 
-                fields: ['name'], 
-                limit: 1, 
-                order: 'create_date desc',
-                context: contextoAuth
-            }
-        });
-        const loteNombre = lotes.length > 0 ? lotes[0].name : 'Sin lote registrado';
+        // Promesa B: Buscar el lote más reciente en el inventario
+        promesas.push(
+            peticionOdoo('/web/dataset/call_kw/', {
+                model: 'stock.lot', 
+                method: 'search_read',
+                args: [[['product_id', '=', prod.id]]],
+                kwargs: { 
+                    fields: ['name'], 
+                    limit: 1, 
+                    order: 'create_date desc',
+                    context: contextoAuth
+                }
+            }).then(lotes => {
+                if (lotes && lotes.length > 0) {
+                    loteNombre = lotes[0].name;
+                }
+            }).catch(e => console.error("Error leyendo lotes:", e))
+        );
 
-        // 5. Renderizar la información en la pantalla de la PWA
+        // Esperar a que ambas consultas terminen
+        await Promise.all(promesas);
+
+        // 4. Renderizar la información final en la PWA
         document.getElementById('res-imagen').src = prod.image_512 ? `data:image/png;base64,${prod.image_512}` : 'https://placehold.co';
         document.getElementById('res-precio').innerText = `$${prod.list_price.toFixed(2)}`;
         document.getElementById('res-lote').innerText = loteNombre;
-        document.getElementById('res-principio').innerText = nombresPrincipios Activos;
+        document.getElementById('res-principio').innerText = nombresPrincipiosActivos;
 
         loader.style.display = 'none';
         tarjeta.style.display = 'block';
 
     } catch (error) {
         loader.style.display = 'none';
-        alert("Error de configuración o comunicación con Odoo.");
-        console.error(error);
+        alert("Ocurrió un inconveniente al procesar los datos de Odoo.");
+        console.error("Detalle del error:", error);
     }
 }
 
