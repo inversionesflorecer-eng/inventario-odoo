@@ -63,59 +63,13 @@
 
 <script>
 // Configuración de Credenciales Odoo (Reemplazar con tus datos)
+// CONFIGURACIÓN DE CREDENCIALES (Actualiza con tus datos reales)
 const ODOO_URL = 'https://farmaciaselecta.com';
-const DB_NAME = 'selecta';
-const USERNAME = 'info@farmaciaselecta.com';
-const PASSWORD = 'Sky$land003';
+const DB_NAME = 'selecta'; // Pon el nombre exacto de tu BD de Odoo
+const USERNAME = 'info@farmaciaselecta.com'; 
+const PASSWORD = '3fc297980a23cb271c513d8ba7c88db919b9f0ac'; // <-- PEGA AQUÍ LA CLAVE DE API LARGA
 
-let videoStream = null;
-let intervaloEscaneo = null;
-
-// --- CONTROL DE LA CÁMARA Y ESCANEO ---
-async function encenderCamara() {
-    if (!('BarcodeDetector' in window)) {
-        alert('El escaneo nativo no es soportado en este navegador. Por favor ingresa el código manualmente.');
-        return;
-    }
-    
-    const videoContainer = document.getElementById('video-container');
-    const video = document.getElementById('webcam');
-    videoContainer.style.display = 'block';
-
-    try {
-        videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        video.srcObject = videoStream;
-        
-        // Iniciar detector de códigos de barra
-        const detector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8', 'qr_code'] });
-        
-        intervaloEscaneo = setInterval(async () => {
-            try {
-                const barcodes = await detector.detect(video);
-                if (barcodes.length > 0) {
-                    const codigoDetectado = barcodes[0].rawValue;
-                    document.getElementById('txt-buscar').value = codigoDetectado;
-                    apagarCamara();
-                    ejecutarConsultaOdoo(codigoDetectado, true); // Busca por código de barras
-                }
-            } catch (e) { /* Evitar saturar la consola durante el renderizado */ }
-        }, 300);
-
-    } catch (err) {
-        alert("Error al acceder a la cámara: " + err);
-        videoContainer.style.display = 'none';
-    }
-}
-
-function apagarCamara() {
-    if (videoStream) {
-        videoStream.getTracks().forEach(track => track.stop());
-    }
-    clearInterval(intervaloEscaneo);
-    document.getElementById('video-container').style.display = 'none';
-}
-
-// --- CONEXIÓN Y CONSULTA A ODOO ---
+// --- CONEXIÓN Y CONSULTA DIRECTA A ODOO 18 ---
 function buscarPorTexto() {
     const texto = document.getElementById('txt-buscar').value.trim();
     if (texto === "") return alert("Por favor escribe algo para buscar.");
@@ -129,17 +83,19 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
     tarjeta.style.display = 'none';
 
     try {
-        // 1. Autenticación JSON-RPC
-        const auth = await peticionOdoo('/web/session/authenticate', { db: DB_NAME, login: USERNAME, password: PASSWORD });
-        
-        // 2. Definir filtro: por código de barras o por nombre/referencia
         const filtro = esCodigoBarras 
             ? [['barcode', '=', criterio]] 
             : ['|', ['name', 'ilike', criterio], ['default_code', 'ilike', criterio]];
 
-        // 3. Buscar Producto
-        const ids = await peticionOdoo('/web/dataset/call_kw', {
-            model: 'product.product', method: 'search', args: [filtro], kwargs: {}
+        // Contexto de autenticación directa por cabecera RPC para Odoo 18
+        const contextoAuth = { login: USERNAME, password: PASSWORD };
+
+        // 1. Buscar Producto DIRECTAMENTE sin llamada de login previa
+        const ids = await peticionOdoo('/web/dataset/call_kw/', {
+            model: 'product.product', 
+            method: 'search', 
+            args: [filtro], 
+            kwargs: { context: contextoAuth }
         });
 
         if (!ids || ids.length === 0) {
@@ -147,22 +103,32 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             return alert("Producto no encontrado en Odoo.");
         }
 
-        // 4. Leer los campos del primer producto encontrado
-        const productos = await peticionOdoo('/web/dataset/call_kw', {
-            model: 'product.product', method: 'read',
-            args: [[ids[0]], ['image_512', 'list_price', 'x_principio_activo']], kwargs: {}
+        const primerId = ids[0]; // Tomamos el primer elemento encontrado
+
+        // 2. Leer los campos específicos del producto encontrado
+        const productos = await peticionOdoo('/web/dataset/call_kw/', {
+            model: 'product.product', 
+            method: 'read',
+            args: [[primerId], ['image_512', 'list_price', 'x_principio_activo']], 
+            kwargs: { context: contextoAuth }
         });
         const prod = productos[0];
 
-        // 5. Consultar Lote en stock.lot (o stock.production.lot en v16)
-        const lotes = await peticionOdoo('/web/dataset/call_kw', {
-            model: 'stock.lot', method: 'search_read',
+        // 3. Consultar el Lote más reciente en stock.lot
+        const lotes = await peticionOdoo('/web/dataset/call_kw/', {
+            model: 'stock.lot', 
+            method: 'search_read',
             args: [[['product_id', '=', prod.id]]],
-            kwargs: { fields: ['name'], limit: 1, order: 'create_date desc' }
+            kwargs: { 
+                fields: ['name'], 
+                limit: 1, 
+                order: 'create_date desc',
+                context: contextoAuth
+            }
         });
         const loteNombre = lotes.length > 0 ? lotes[0].name : 'Sin lote registrado';
 
-        // 6. Pintar las 4 cosas en la pantalla
+        // 4. Renderizar la información en la pantalla de la PWA
         document.getElementById('res-imagen').src = prod.image_512 ? `data:image/png;base64,${prod.image_512}` : 'https://placehold.co';
         document.getElementById('res-precio').innerText = `$${prod.list_price.toFixed(2)}`;
         document.getElementById('res-lote').innerText = loteNombre;
@@ -178,13 +144,19 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
     }
 }
 
-// Función core para peticiones fetch HTTP
+// Función core limpia para peticiones HTTP POST JSON-RPC con barra final
 async function peticionOdoo(ruta, params) {
     const response = await fetch(`${ODOO_URL}${ruta}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', method: 'call', params: params, id: Math.random() })
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'call', params: params, id: Math.floor(Math.random() * 1000) })
     });
     const json = await response.json();
+    
+    if (json.error) {
+        throw new Error(json.error.data.message || "Error interno de Odoo");
+    }
+    
     return json.result;
 }
 </script>
