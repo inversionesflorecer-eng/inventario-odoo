@@ -87,7 +87,6 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             ? [['barcode', '=', criterio]] 
             : ['|', ['name', 'ilike', criterio], ['default_code', 'ilike', criterio]];
 
-        // Contexto de autenticación directa por cabecera RPC para Odoo 18
         const contextoAuth = { login: USERNAME, password: PASSWORD };
 
         // 1. Buscar Producto DIRECTAMENTE sin llamada de login previa
@@ -103,18 +102,32 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
             return alert("Producto no encontrado en Odoo.");
         }
 
-        const primerId = ids[0]; // Tomamos el primer elemento encontrado
+        const primerId = ids[0]; // Tomamos el primer elemento encontrado de la lista
 
-        // 2. Leer los campos específicos del producto encontrado
+        // 2. Leer los campos del producto (Reemplazado x_principio_activo por salt_ids)
         const productos = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'product.product', 
             method: 'read',
-            args: [[primerId], ['image_512', 'list_price', 'x_principio_activo']], 
+            args: [[primerId], ['image_512', 'list_price', 'salt_ids']], 
             kwargs: { context: contextoAuth }
         });
         const prod = productos[0];
 
-        // 3. Consultar el Lote más reciente en stock.lot
+        // 3. Procesar el campo Many2many (salt_ids) para obtener los nombres reales
+        let nombresPrincipios Activos = 'No asignado';
+        if (prod.salt_ids && prod.salt_ids.length > 0) {
+            // Consultamos el modelo relacionado 'basic.salt' para traer el campo 'name'
+            const salesData = await peticionOdoo('/web/dataset/call_kw/', {
+                model: 'basic.salt',
+                method: 'read',
+                args: [prod.salt_ids, ['name']],
+                kwargs: { context: contextoAuth }
+            });
+            // Unimos todos los nombres en una sola cadena separada por comas (por si tiene más de una sal)
+            nombresPrincipios Activos = salesData.map(s => s.name).join(', ');
+        }
+
+        // 4. Consultar el Lote más reciente en stock.lot
         const lotes = await peticionOdoo('/web/dataset/call_kw/', {
             model: 'stock.lot', 
             method: 'search_read',
@@ -128,18 +141,18 @@ async function ejecutarConsultaOdoo(criterio, esCodigoBarras) {
         });
         const loteNombre = lotes.length > 0 ? lotes[0].name : 'Sin lote registrado';
 
-        // 4. Renderizar la información en la pantalla de la PWA
+        // 5. Renderizar la información en la pantalla de la PWA
         document.getElementById('res-imagen').src = prod.image_512 ? `data:image/png;base64,${prod.image_512}` : 'https://placehold.co';
         document.getElementById('res-precio').innerText = `$${prod.list_price.toFixed(2)}`;
         document.getElementById('res-lote').innerText = loteNombre;
-        document.getElementById('res-principio').innerText = prod.x_principio_activo || 'No asignado';
+        document.getElementById('res-principio').innerText = nombresPrincipios Activos;
 
         loader.style.display = 'none';
         tarjeta.style.display = 'block';
 
     } catch (error) {
         loader.style.display = 'none';
-        alert("Error de comunicación con Odoo.");
+        alert("Error de configuración o comunicación con Odoo.");
         console.error(error);
     }
 }
